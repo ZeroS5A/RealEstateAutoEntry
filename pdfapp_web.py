@@ -2,6 +2,7 @@
 import cv2
 import re
 from paddleocr import PaddleOCR
+import json
 import os
 import sys
 from PIL import Image
@@ -349,6 +350,22 @@ class ContractOCRService:
         except Exception as e:
             return None, str(e)
 
+def read_json_config(config_path="config.json"):
+    """
+    读取.json格式的配置文件
+    :param config_path: 配置文件路径
+    :return: 配置字典
+    """
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"配置文件 {config_path} 不存在！")
+    
+    # 读取并解析JSON文件
+    with open(config_path, "r", encoding="utf-8") as f:
+        try:
+            config = json.load(f)
+            return config
+        except json.JSONDecodeError:
+            raise ValueError("配置文件格式错误（非合法JSON）")
 
 # -------------------------- 1. 初始化浏览器，访问登录页 --------------------------
 def init_browser_and_visit_login():
@@ -443,10 +460,7 @@ def click_target_element(driver,clickPATH):
         driver.save_screenshot("click_element_error.png")
         return False
 
-def web_input(input_data):
-    USERNAME = "ldj260001"
-    PASSWORD = "Hy111111#"
-    
+def web_input(input_data):      
     # ===== 【优化点】使用 st.session_state 缓存 driver 对象，实现浏览器实例和页面状态复用 =====
     if 'browser_driver' not in st.session_state:
         st.session_state.browser_driver = None
@@ -472,7 +486,13 @@ def web_input(input_data):
             return # 如果驱动初始化失败，直接返回，避免程序崩溃
             
         st.session_state.browser_driver = driver
-        login_success = login(driver, USERNAME, PASSWORD)
+        try:
+            config = read_json_config()
+            USERNAME = config["bdc"]["username"]
+            PASSWORD = config["bdc"]["password"]
+            login_success = login(driver, USERNAME, PASSWORD)
+        except Exception as e:
+            print(f"读取配置失败：{e}")
     # =========================================================================================
     
     if login_success:
