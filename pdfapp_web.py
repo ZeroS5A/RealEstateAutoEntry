@@ -550,7 +550,7 @@ def web_input(input_data):
             input_success = False  # 修复局部变量未初始化的问题
             try:
                 click_success = click_target_element(driver,"//label[text()='抵押方式']/following-sibling::div//input[@class='el-input__inner' and @readonly='readonly']")
-                if len(input_data['抵押合同号'])>30:
+                if '高额' in str(input_data['抵押合同号']):
                     click_success = click_target_element(driver,'//*[text()="最高额抵押"]')
                 else:
                     click_success = click_target_element(driver,'//*[text()="一般抵押"]')
@@ -721,7 +721,7 @@ def get_service():
     return ContractOCRService()
 
 def main():
-    st.header("📄 河源不动产信息自动录入终端（V2.1 BY ZeroS）")
+    st.header("📄 河源不动产信息自动录入终端（V2.2 BY ZeroS）")
     
     if 'last_file_id' not in st.session_state:
         st.session_state.last_file_id = None
@@ -790,9 +790,9 @@ def main():
                 # 合并后的模板选项
                 templates = [
                     "使用原始提取值",
-                    "02006000292026二手贷0000",
-                    "02006000292026一手贷0000",
-                    "02006000292026消费经营组合贷贷000、02006000292026高额贷（抵）000"
+                    "02006000292026二手贷7000",
+                    "02006000292026一手贷7000",
+                    "02006000292026消费经营组合贷7000、02006000292026高额贷（抵）7000"
                 ]
                 st.selectbox(
                     "快捷合同模板选择", 
