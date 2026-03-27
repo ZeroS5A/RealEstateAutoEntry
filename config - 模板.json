@@ -2,5 +2,9 @@
   "bdc": {
     "username": "",
     "password": ""
-  }
+  },
+  "phones": [
+    "",
+    ""
+  ]
 }

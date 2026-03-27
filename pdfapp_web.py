@@ -509,6 +509,11 @@ def web_input(input_data):
         click_success = click_target_element(driver,'//*[@id="tab-verticalCollapse_1766980689878640"]')
         click_success = click_target_element(driver,'//*[@id="pane-verticalCollapse_1766980689878640"]/div/div/form/div[2]/div/div/div/input')
         click_success = click_target_element(driver,'//li[@class="el-select-dropdown__item" and normalize-space(span/text())="中国工商银行股份有限公司龙川支行"]')
+        cert_input = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH, '//*[@id="pane-verticalCollapse_1766980689878640"]/div/div/form/div[3]/div/div/input'))
+        )
+        cert_input.clear()
+        cert_input.send_keys(input_data['抵押权人联系电话'])
 
         # 录入抵押物信息
         click_success = click_target_element(driver,'//*[@id="tab-verticalCollapse_1766980690997417"]')
@@ -704,7 +709,7 @@ def web_input(input_data):
         click_success = click_target_element(driver,'//*[@id="tab-verticalCollapse_1766980692997735"]')
 
         # 【优化点】删除了 time.sleep(600)。由于开启了 detach，执行结束后浏览器将由人工管理并保持开启，这不仅能节省内存卡顿也让页面瞬间解除正在执行的状态。
-        print("✅ 自动化填单完成，请人工核对并手动关闭浏览器或进行下一条录入！")
+        print("✅ 自动化填单完成，请人工核职并手动关闭浏览器或进行下一条录入！")
 
 
 # ---------------------------------------------------------
@@ -853,27 +858,42 @@ def main():
         current_zh = st.session_state.get(f"api_zh_{f_key}", "")
         current_bdcdyh = st.session_state.get(f"api_bdc_{f_key}", "")
         
-        # 【修改重点 3】这里改为了普通字典对象，不使用列表包裹，防止selenium send_keys报错
-        input_data_flat = {
-            "抵押人名称": current_mortgagor,
-            "抵押人2名称": current_mortgagor2,
-            "抵押人联系电话": "6753094",
-            "抵押人证件号码": current_id_card,
-            "抵押人2证件号码": current_id_card2,
-            "不动产证号": current_zh,
-            "不动产单元号": current_bdcdyh,
-            "抵押方式": "",
-            "抵押顺位": "1",
-            "抵押合同号": current_contract_no,
-            "债权数额": current_amount,
-            "起始时间": current_start_date,
-            "结束时间": current_end_date,
-            "担保范围": "主债权本金、利息、罚息、复利、违约金、损害赔偿金以及实现抵押权的费用（包括但不限于诉讼费、律师费等）"
-        }
-        
+        # === 新增：读取手机号码列表配置 ===
+        phone_list = ["6753094"] # 默认保底值
+        try:
+            config_data = read_json_config()
+            # 检查是否有配置phones数组
+            if "phones" in config_data and isinstance(config_data["phones"], list) and len(config_data["phones"]) > 0:
+                phone_list = [str(p) for p in config_data["phones"]] # 确保读取出来的是字符串
+        except Exception:
+            pass
+        # ==================================
+
         # 【修改重点 1、2】修复了with语法，将直接调用函数改为了通过 Streamlit 按钮判定后再执行
         _, _, btn_col = st.columns([2, 2, 1])
         with col3:
+            # --- 新增下拉框在按钮上方 ---
+            selected_phone = st.selectbox("选择抵押权人联系电话", phone_list, key=f"phone_{f_key}")
+            
+            # 【修改重点 3】这里改为了普通字典对象，不使用列表包裹，防止selenium send_keys报错
+            input_data_flat = {
+                "抵押人名称": current_mortgagor,
+                "抵押人2名称": current_mortgagor2,
+                "抵押人联系电话": "6753094",
+                "抵押权人联系电话": selected_phone,  # <--- 使用用户在下拉框中选中的手机号
+                "抵押人证件号码": current_id_card,
+                "抵押人2证件号码": current_id_card2,
+                "不动产证号": current_zh,
+                "不动产单元号": current_bdcdyh,
+                "抵押方式": "",
+                "抵押顺位": "1",
+                "抵押合同号": current_contract_no,
+                "债权数额": current_amount,
+                "起始时间": current_start_date,
+                "结束时间": current_end_date,
+                "担保范围": "主债权本金、利息、罚息、复利、违约金、损害赔偿金以及实现抵押权的费用（包括但不限于诉讼费、律师费等）"
+            }
+
             if st.button("录入系统"):
                 with st.spinner("正在将数据推送到业务系统浏览器，请勿关闭..."):
                     web_input(input_data_flat)
