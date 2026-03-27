@@ -512,6 +512,7 @@ def web_input(input_data):
         cert_input = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.XPATH, '//*[@id="pane-verticalCollapse_1766980689878640"]/div/div/form/div[3]/div/div/input'))
         )
+        time.sleep(1)
         cert_input.clear()
         cert_input.send_keys(input_data['抵押权人联系电话'])
 
@@ -726,7 +727,7 @@ def get_service():
     return ContractOCRService()
 
 def main():
-    st.header("📄 河源不动产信息自动录入终端（V2.2 BY ZeroS）")
+    st.header("📄 河源不动产信息自动录入终端（V2.3 BY ZeroS）")
     
     if 'last_file_id' not in st.session_state:
         st.session_state.last_file_id = None
@@ -859,21 +860,41 @@ def main():
         current_bdcdyh = st.session_state.get(f"api_bdc_{f_key}", "")
         
         # === 新增：读取手机号码列表配置 ===
-        phone_list = ["6753094"] # 默认保底值
+        phone_options = [{"name": "请检查配置文件", "phone": "NULL"}]# 默认保底值
         try:
             config_data = read_json_config()
-            # 检查是否有配置phones数组
+            # 检查是否有配置phones数组（数组元素为 {name:"xxx", phone:"xxx"}）
             if "phones" in config_data and isinstance(config_data["phones"], list) and len(config_data["phones"]) > 0:
-                phone_list = [str(p) for p in config_data["phones"]] # 确保读取出来的是字符串
+                # 过滤空数据，保证格式正确
+                valid_phones = []
+                for item in config_data["phones"]:
+                    # 兼容配置：有name和phone字段、且phone不为空才生效
+                    if isinstance(item, dict) and item.get("phone") and item.get("name"):
+                        valid_phones.append({
+                            "name": str(item["name"]).strip(),
+                            "phone": str(item["phone"]).strip()
+                        })
+                if valid_phones:
+                    phone_options = valid_phones
         except Exception:
             pass
         # ==================================
+
+        phone_display = [f"{item['name']} {item['phone']}" for item in phone_options]
+        phone_values = [item["phone"] for item in phone_options]
 
         # 【修改重点 1、2】修复了with语法，将直接调用函数改为了通过 Streamlit 按钮判定后再执行
         _, _, btn_col = st.columns([2, 2, 1])
         with col3:
             # --- 新增下拉框在按钮上方 ---
-            selected_phone = st.selectbox("选择抵押权人联系电话", phone_list, key=f"phone_{f_key}")
+            selected_idx = st.selectbox(
+                "选择抵押权人联系电话",
+                range(len(phone_display)),
+                format_func=lambda x: phone_display[x],  # 下拉显示内容
+                key=f"phone_{f_key}"
+            )
+            selected_phone = phone_values[selected_idx]
+            # selected_phone = st.selectbox("选择抵押权人联系电话", phone_list, key=f"phone_{f_key}")
             
             # 【修改重点 3】这里改为了普通字典对象，不使用列表包裹，防止selenium send_keys报错
             input_data_flat = {
