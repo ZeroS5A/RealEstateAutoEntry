@@ -46,11 +46,11 @@ echo.
 echo [1/2] 正在更新基础包管理器 (pip)...
 "%PYTHON_EXE%" -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-:: 4. 安装核心依赖
+:: 4. 安装核心依赖 (已更新为轻量级 DrissionPage 方案)
 echo.
 echo [2/2] 正在下载并安装项目依赖包 (这一步可能需要几分钟时间)...
 :: 注意：这里必须安装 opencv-contrib-python 才能支持微信二维码引擎
-"%PYTHON_EXE%" -m pip install streamlit opencv-contrib-python rapidocr_onnxruntime Pillow numpy requests urllib3 PyMuPDF pandas selenium webdriver_manager -i https://pypi.tuna.tsinghua.edu.cn/simple
+"%PYTHON_EXE%" -m pip install streamlit opencv-contrib-python rapidocr_onnxruntime Pillow numpy requests urllib3 PyMuPDF pandas DrissionPage -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 echo.
 echo =========================================
