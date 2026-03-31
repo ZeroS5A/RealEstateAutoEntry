@@ -1,7 +1,7 @@
 ﻿import streamlit as st
 import cv2
 import re
-from paddleocr import PaddleOCR
+from rapidocr_onnxruntime import RapidOCR # 【修改点1】替换 PaddleOCR 为 RapidOCR
 import json
 import os
 import sys
@@ -41,17 +41,12 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class ContractOCRService:
     def __init__(self):
-        # 1. 初始化 PaddleOCR
+        # 1. 初始化 RapidOCR (轻量、快速、ONNX驱动)
         try:
-            self.ocr = PaddleOCR(
-                use_angle_cls=True, 
-                lang="ch",
-                enable_mkldnn=False,
-                use_gpu=False,
-                show_log=False
-            )
-        except TypeError:
-            self.ocr = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
+            self.ocr = RapidOCR()
+        except Exception as e:
+            st.error(f"RapidOCR 初始化失败: {e}")
+            self.ocr = None
 
         # 2. 微信二维码引擎配置
         self.model_dir = "wechat_models"
@@ -122,6 +117,78 @@ class ContractOCRService:
         cleaned = re.sub(r'[）(\s]+$', '', cleaned)
         cleaned = re.sub(r'\s+', ' ', cleaned)
         return cleaned.strip()
+        
+    def _find_qr_crops(self, img):
+        """【修改点2】智能寻找疑似二维码区域并进行裁剪，应对大图识别率低的问题"""
+        crops = []
+        if img is None: return crops
+        
+        h, w = img.shape[:2]
+        
+        # --- 策略1：边缘与形态学定位 ---
+        try:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            # 根据图片大小进行缩放，加速运算与降噪
+            scale = 1.0
+            if max(h, w) > 2000:
+                scale = 1000.0 / max(h, w)
+                gray = cv2.resize(gray, (0, 0), fx=scale, fy=scale)
+                
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            edges = cv2.Canny(blurred, 50, 150)
+            
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+            closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+            
+            contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            center_x, center_y = int(w * scale // 2), int(h * scale // 2)
+            candidates = []
+            
+            for c in contours:
+                x, y, cw, ch = cv2.boundingRect(c)
+                area = cw * ch
+                img_area = (h * w * scale * scale)
+                
+                # 过滤明显不是二维码的大小比例
+                if area < (img_area * 0.005) or area > (img_area * 0.4):
+                    continue
+                    
+                aspect_ratio = float(cw) / max(ch, 1)
+                # 寻找近似正方形的轮廓
+                if 0.7 < aspect_ratio < 1.3:
+                    cx, cy = x + cw // 2, y + ch // 2
+                    # 计算到图片中心的距离，往往二维码会在中间
+                    dist = (cx - center_x)**2 + (cy - center_y)**2
+                    candidates.append((dist, x, y, cw, ch))
+            
+            # 优先选择离中心最近的候选框
+            candidates.sort(key=lambda item: item[0])
+            
+            for _, x, y, cw, ch in candidates[:3]:
+                # 还原至原始分辨率尺寸
+                real_x = int(x / scale)
+                real_y = int(y / scale)
+                real_cw = int(cw / scale)
+                real_ch = int(ch / scale)
+                
+                # 增加Padding (Quiet Zone)
+                pad = max(50, int(real_cw * 0.2))
+                x1 = max(0, real_x - pad)
+                y1 = max(0, real_y - pad)
+                x2 = min(w, real_x + real_cw + pad)
+                y2 = min(h, real_y + real_ch + pad)
+                
+                crops.append(img[y1:y2, x1:x2])
+        except Exception as e:
+            print(f"智能裁剪二维码区域异常: {e}")
+
+        # --- 策略2：兜底直接裁中心区域 ---
+        # "一般位于中间"，如果智能分析找不到，直接裁中间 1/2 宽高的区域进行识别
+        cx_crop = img[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4]
+        crops.append(cx_crop)
+        
+        return crops
 
     def process_file(self, uploaded_file):
         """处理上传的文件流"""
@@ -155,7 +222,12 @@ class ContractOCRService:
                         preview_img = cv2.cvtColor(cv_img_1, cv2.COLOR_BGR2RGB) 
                         
                         enhanced_img_1 = self._enhance_image(cv_img_1)
-                        ocr_result = self.ocr.ocr(enhanced_img_1)
+                        # 【修改点1】适配 RapidOCR 返回格式以兼容旧解析逻辑
+                        if self.ocr:
+                            rapid_res, _ = self.ocr(enhanced_img_1)
+                            if rapid_res:
+                                # 将 RapidOCR 格式转为类似 PaddleOCR 的包裹格式
+                                ocr_result = [[[box, (text, float(score))] for box, text, score in rapid_res]]
                     
                     if len(doc) > 0:
                         last_page_idx = len(doc) - 1
@@ -179,7 +251,11 @@ class ContractOCRService:
             preview_img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
             
             enhanced_img = self._enhance_image(img_bgr)
-            ocr_result = self.ocr.ocr(enhanced_img)
+            # 【修改点1】适配 RapidOCR 返回格式以兼容旧解析逻辑
+            if self.ocr:
+                rapid_res, _ = self.ocr(enhanced_img)
+                if rapid_res:
+                    ocr_result = [[[box, (text, float(score))] for box, text, score in rapid_res]]
             qr_img = img_bgr 
 
         if ocr_result:
@@ -329,26 +405,41 @@ class ContractOCRService:
         if self.qr_detector is None or img is None:
             return None, "引擎未就绪或图片为空"
 
+        def _fetch_api(qr_text):
+            try:
+                params_str = qr_text.split("?")[-1]
+                params = [unquote(p) for p in params_str.split('&')]
+                payload = self.fixed_params.copy()
+                keys = ["BDCDYID", "YWID", "BDCLX"]
+                for i, key in enumerate(keys):
+                    if i < len(params): payload[key] = params[i]
+
+                headers = {"User-Agent": "Mozilla/5.0", "X-Requested-With": "XMLHttpRequest"}
+                r = requests.post(self.target_api_url, data=payload, headers=headers, timeout=10, verify=False)
+                if r.status_code == 200:
+                    return r.json(), "Success"
+                else:
+                    return None, f"HTTP {r.status_code}"
+            except Exception as e:
+                return None, str(e)
+
+        # 【修改点2】先利用局部裁剪区来检测二维码
+        crops = self._find_qr_crops(img)
+        for crop in crops:
+            if crop is not None and crop.size > 0:
+                res, _ = self.qr_detector.detectAndDecode(crop)
+                if res and res[0]:
+                    print("[QR] 局部裁剪区域识别成功！")
+                    return _fetch_api(res[0])
+                    
+        # 局部识别如果失效，兜底使用全图检测
+        print("[QR] 局部识别失效，尝试全图识别...")
         res, _ = self.qr_detector.detectAndDecode(img)
-        if not res or not res[0]:
-            return None, "未识别到二维码"
+        if res and res[0]:
+            return _fetch_api(res[0])
 
-        try:
-            params_str = res[0].split("?")[-1]
-            params = [unquote(p) for p in params_str.split('&')]
-            payload = self.fixed_params.copy()
-            keys = ["BDCDYID", "YWID", "BDCLX"]
-            for i, key in enumerate(keys):
-                if i < len(params): payload[key] = params[i]
+        return None, "未识别到二维码"
 
-            headers = {"User-Agent": "Mozilla/5.0", "X-Requested-With": "XMLHttpRequest"}
-            r = requests.post(self.target_api_url, data=payload, headers=headers, timeout=10, verify=False)
-            if r.status_code == 200:
-                return r.json(), "Success"
-            else:
-                return None, f"HTTP {r.status_code}"
-        except Exception as e:
-            return None, str(e)
 
 def read_json_config(config_path="config.json"):
     """
