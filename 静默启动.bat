@@ -1,4 +1,7 @@
-﻿@echo off
+﻿:: 设置控制台编码为 UTF-8，防止中文乱码
+chcp 65001 >nul
+
+@echo off
 :: ==========================================
 :: 隐藏 CMD 窗口逻辑 (核心修改)
 :: ==========================================
@@ -7,8 +10,6 @@ if "%1" == "h" goto begin
 mshta vbscript:createobject("wscript.shell").run("""%~f0"" h",0)(window.close)&&exit
 :begin
 
-:: 设置控制台编码为 UTF-8，防止中文乱码
-chcp 65001 >nul
 setlocal
 
 :: 获取当前脚本所在目录
