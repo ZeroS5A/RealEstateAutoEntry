@@ -47,6 +47,7 @@ class ContractOCRService:
         }
         # 加载引擎
         self.qr_detector = self._init_wechat_qrcode()
+        self.last_crops = []
 
         # 3. 政务系统后端接口配置 (用于通过二维码解析出的 URL 获取不动产核心数据)
         self.target_api_url = "https://bdc.heyuan.gov.cn/actionapi/ZDTFHT/GetInfo"
@@ -138,19 +139,19 @@ class ContractOCRService:
                 scale = 1000.0 / max(h, w)
                 gray = cv2.resize(gray, (0, 0), fx=scale, fy=scale)
                 
+            # 【优化】使用自适应阈值替代 Canny，对光照变化更鲁棒
             blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            # Canny 边缘检测提取二维码密集特征
-            edges = cv2.Canny(blurred, 50, 150)
-            
+            binary = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
+
             # 形态学闭运算：把二维码中密集的黑白点连接成一个“实心大方块”
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
-            closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-            
+            closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
             # 【优化点】：增加形态学开运算
             # 作用：去除细长的干扰线（如虚线框）或孤立的文字块，只保留大面积实心区块
             kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
             opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel_open)
-            
+
             # 寻找外轮廓
             contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
@@ -187,7 +188,7 @@ class ContractOCRService:
                 
                 # 【优化点】：增加自适应 Padding（静区保护）
                 # 二维码识别必须要有足够的白边，否则引擎会失效
-                pad = max(60, int(real_cw * 0.2))
+                pad = max(80, int(real_cw * 0.1))
                 x1 = max(0, real_x - pad)
                 y1 = max(0, real_y - pad)
                 x2 = min(w, real_x + real_cw + pad)
@@ -306,7 +307,7 @@ class ContractOCRService:
         if not ocr_result or ocr_result[0] is None:
             return {
                 "合同编号": "未找到", "抵押人": "未找到", "抵押人2": "",
-                "证件号码": "未找到", "证件号码2": "", "债权数额": "未找到",
+                "证件号码": "", "证件号码2": "", "债权数额": "未找到",
                 "起始时间": "未找到", "结束时间": "未找到"
             }
 
@@ -315,7 +316,7 @@ class ContractOCRService:
         
         extracted = {
             "合同编号": "未找到", "抵押人": "未找到", "抵押人2": "",
-            "证件号码": "未找到", "证件号码2": "", "债权数额": "未找到",
+            "证件号码": "", "证件号码2": "", "债权数额": "未找到",
             "起始时间": "未找到", "结束时间": "未找到"
         }
 
@@ -440,6 +441,7 @@ class ContractOCRService:
 
         # 按先后顺序遍历形态学切割出的局部区域进行识别
         crops = self._find_qr_crops(img)
+        self.last_crops = crops
         for crop in crops:
             if crop is not None and crop.size > 0:
                 res, _ = self.qr_detector.detectAndDecode(crop)
@@ -587,6 +589,7 @@ def web_input(input_data):
         # 导航并依次展开各级菜单
         click_success = click_target_element(page,'//*[@id="app"]/div/div/div[1]/div[1]/ul/div[2]/li/div')
         click_success = click_target_element(page,'//*[@id="app"]/div/div/div[1]/div[1]/ul/div[2]/li/ul/li/ul/div[1]/li/div')
+        time.sleep(1)
         click_success = click_target_element(page,'//*[@id="app"]/div/div/div[1]/div[1]/ul/div[2]/li/ul/li/ul/div[1]/li/ul/li/ul/div[1]/li')
 
         # [阶段 1] 选择公共信息
@@ -680,7 +683,7 @@ def web_input(input_data):
                 # 强行通过 JS 点击下拉框，防止动画遮盖导致的无法点击
                 visible_type_inputs[index].click(by_js=True)
                 print("已点击证件类型下拉框")
-                time.sleep(0.8) 
+                time.sleep(0.5) 
                 
                 # ElementUI 会把渲染好的下拉菜单放在 <body> 最末尾
                 dropdowns = page.eles('xpath://div[contains(@class, "el-select-dropdown")]')
@@ -835,8 +838,8 @@ def main():
                 # 双向绑定设计，用户更改输入框内容后，值保留在 session 对应的 key 里
                 contract_no = st.text_input("合同编号", value=info['合同编号'], key=f"no_{f_key}")
                 mortgagor = st.text_input("抵押人", value=info['抵押人'], key=f"mort_{f_key}")
-                mortgagor2 = st.text_input("抵押人2", value=info.get('抵押人2', ''), key=f"mort2_{f_key}")
                 id_card = st.text_input("证件号码", value=info['证件号码'], key=f"id_{f_key}")
+                mortgagor2 = st.text_input("抵押人2", value=info.get('抵押人2', ''), key=f"mort2_{f_key}")
                 id_card2 = st.text_input("证件号码2", value=info.get('证件号码2', ''), key=f"id2_{f_key}")
                 amount = st.text_input("债权数额", value=info['债权数额'], key=f"amt_{f_key}")
                 
@@ -867,12 +870,19 @@ def main():
                 bdcdyh = st.text_input("不动产单元号 (BDCDYH)", value="", key=f"api_bdc_{f_key}")
 
         st.markdown("---")
-        
+
+        if st.session_state.api_data is None and service.last_crops:
+            st.warning("二维码识别失败。正在尝试显示识别到的区域...")
+            cols = st.columns(3)
+            for i, crop in enumerate(service.last_crops[:3]):
+                with cols[i]:
+                    st.image(crop, caption=f"Debug Crop {i}")
+
         # 收集经用户复核过后的终态数据字典
         current_contract_no = st.session_state.get(f"no_{f_key}", "")
-        current_mortgagor = st.session_state.get(f"mort_{f_key}", "")
-        current_mortgagor2 = st.session_state.get(f"mort2_{f_key}", "")
+        current_mortgagor = st.session_state.get(f"mort_{f_key}", "") 
         current_id_card = st.session_state.get(f"id_{f_key}", "")
+        current_mortgagor2 = st.session_state.get(f"mort2_{f_key}", "")
         current_id_card2 = st.session_state.get(f"id2_{f_key}", "")
         current_amount = st.session_state.get(f"amt_{f_key}", "")
         current_start_date = st.session_state.get(f"start_{f_key}", "")
