@@ -120,6 +120,30 @@ class ContractOCRService:
         cleaned = re.sub(r'\s+', ' ', cleaned)
         return cleaned.strip()
         
+    def _is_likely_qr(self, crop):
+        """简单的二维码特征检查：基于对比度和轮廓结构"""
+        if crop is None or crop.size == 0:
+            return False
+
+        # 1. 转换为灰度
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+
+        # 2. 对比度检查（QR码通常有很高的对比度）
+        if gray.max() - gray.min() < 50:
+            return False
+
+        # 3. 简单的特征检查：二维码通常包含很多小的黑白方块，导致高频变化
+        # 使用 Sobel 边缘检测
+        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        gradient = np.sqrt(sobel_x**2 + sobel_y**2)
+
+        # 如果边缘强度不够，可能不是二维码
+        if gradient.mean() < 10:
+            return False
+
+        return True
+
     def _find_qr_crops(self, img):
         """
         【已针对“附图页”进行算法优化】
@@ -176,25 +200,29 @@ class ContractOCRService:
                     dist = (cx - center_x)**2 + (cy - center_y)**2
                     candidates.append((dist, x, y, cw, ch))
             
-            # 按距离页面中心的距离升序排序，取最中间的候选框
+            # 按距离页面中心的距离升序排序
             candidates.sort(key=lambda item: item[0])
-            
-            for _, x, y, cw, ch in candidates[:3]:
+
+            # 增加候选项检查数量，并进行特征校验
+            for _, x, y, cw, ch in candidates[:10]:
                 # 还原至原始超大图分辨率的坐标
                 real_x = int(x / scale)
                 real_y = int(y / scale)
                 real_cw = int(cw / scale)
                 real_ch = int(ch / scale)
-                
+
                 # 【优化点】：增加自适应 Padding（静区保护）
-                # 二维码识别必须要有足够的白边，否则引擎会失效
                 pad = max(80, int(real_cw * 0.1))
                 x1 = max(0, real_x - pad)
                 y1 = max(0, real_y - pad)
                 x2 = min(w, real_x + real_cw + pad)
                 y2 = min(h, real_y + real_ch + pad)
-                
-                crops.append(img[y1:y2, x1:x2])
+
+                crop = img[y1:y2, x1:x2]
+
+                # 特征校验
+                if self._is_likely_qr(crop):
+                    crops.append(crop)
         except Exception as e:
             print(f"智能裁剪二维码区域异常: {e}")
 
@@ -757,7 +785,7 @@ def get_service():
     return ContractOCRService()
 
 def main():
-    st.header("📄 河源不动产信息自动录入终端（V3.1 BY ZeroS）")
+    st.header("📄 河源不动产信息自动录入终端（V3.2 BY ZeroS）")
     
     # Session State 初始化，用于在 Streamlit 的重绘机制中长久保留计算好的数据
     if 'last_file_id' not in st.session_state: st.session_state.last_file_id = None
