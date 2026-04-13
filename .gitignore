@@ -5,3 +5,5 @@ click_element_error.png
 login_error.png
 startup_log.txt
 config.json
+.claude/
+__pycache__/
