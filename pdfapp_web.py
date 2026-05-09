@@ -15,6 +15,8 @@ from urllib.parse import unquote
 import gc
 import hashlib
 import pandas as pd
+import tempfile
+import time
 
 # =========================================================
 # 【核心模块】引入 DrissionPage，用于完全静默且防反爬的浏览器自动化操作
@@ -632,7 +634,7 @@ def click_target_element(page, clickPATH):
         print(f"点击目标元素失败：{str(e)}")
         return False
 
-def web_input(input_data):      
+def web_input(input_data, uploaded_file):      
     """
     【核心自动填单流水线】
     结合提取到的文本与接口数据，依次填写"抵押权人"、"抵押物"、"抵押信息"以及"抵押人"。
@@ -821,9 +823,45 @@ def web_input(input_data):
                 print("未找到新增按钮，如系统已有两行可忽略该错误：" + str(e))
             
             fill_mortgagor_info(1, input_data['抵押人2名称'], input_data['抵押人2证件号码'], input_data['抵押人联系电话'])
+                # [执行] 循环录入抵押人结束后的点击操作
+        print("开始执行后续点击操作...")
         
+        # [阶段 6] 上传pdf
+        # 1. 点击标签页
+        page.ele('xpath://*[@id="tab-verticalCollapse_1766980692997735"]').click()
+        # time.sleep(0.5) 
+        
+        # 2. 点击表格中的按钮
+        page.ele('xpath://*[@id="pane-verticalCollapse_1766980692997735"]/div/div/div[2]/div[4]/div[2]/table/tbody/tr/td[11]/div/div/button').click()
+        time.sleep(0.5)
+        
+        # 3. 点击弹出框中的上传按钮
+        page.ele('xpath://button[span[text()="上传附件"]]').click()
+        # time.sleep(1) # 等待上传组件加载
+
+        # 上传 PDF 文件
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+            tmp.write(uploaded_file.getvalue())
+            tmp_path = tmp.name
+
+        file_input = page.ele('xpath://input[@class="el-upload__input"]')
+        file_input.input(tmp_path)
+        print(f"✅ 文件已上传: {tmp_path}")
+        # time.sleep(2)
+
+        # 关闭上传窗口
+        upload_confirm_xpath = '//div[@role="dialog" and @aria-label="上传附件"]//div[contains(@class, "el-dialog__footer")]//button[span[text()="确定"]]'
+        page.wait.ele_displayed(upload_confirm_xpath, timeout=1)
+        page.ele(f'xpath:{upload_confirm_xpath}').click()
+        time.sleep(1)
+
+        # 关闭材料窗口
+        edit_confirm_xpath = '//div[@role="dialog" and @aria-label="编辑材料"]//div[contains(@class, "el-dialog__footer")]//button[span[text()="确定"]]'
+        page.wait.ele_displayed(edit_confirm_xpath, timeout=1)
+        page.ele(f'xpath:{edit_confirm_xpath}').click()
+
         # 任务终点：跳转到最后的提交大表检查页，交由人工二次复核并提交
-        click_success = click_target_element(page,'//*[@id="tab-verticalCollapse_1766980692997735"]')
+        # click_success = click_target_element(page,'//*[@id="tab-verticalCollapse_1766980692997735"]')
         print("✅ 自动化填单完成，请人工复核或手动关闭浏览器进行下一条录入！")
 
 
@@ -1028,7 +1066,7 @@ def main():
             # 执行流水的最终触发按钮
             if st.button("录入系统"):
                 with st.spinner("正在将数据推送到业务系统浏览器，请勿关闭..."):
-                    web_input(input_data_flat)
+                    web_input(input_data_flat, uploaded_file)
                     st.success("浏览器操作结束，请在网页中人工复核或手动关闭。")
 
 if __name__ == "__main__":
