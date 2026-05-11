@@ -850,14 +850,16 @@ def web_input(input_data, uploaded_file):
         # time.sleep(2)
 
         # 关闭上传窗口
-        upload_confirm_xpath = '//div[@role="dialog" and @aria-label="上传附件"]//div[contains(@class, "el-dialog__footer")]//button[span[text()="确定"]]'
-        page.wait.ele_displayed(upload_confirm_xpath, timeout=1)
-        page.ele(f'xpath:{upload_confirm_xpath}').click()
-        time.sleep(1)
+        upload_dialog_xpath = '//div[@role="dialog" and @aria-label="上传附件"]'
+        upload_confirm_xpath = upload_dialog_xpath + '//div[contains(@class, "el-dialog__footer")]//button[span[text()="确定"]]'
+        upload_wrapper= page.ele(f'xpath:{upload_confirm_xpath}')
+        upload_wrapper.click()
+        # 等待上传弹窗完全消失
+        page.wait.ele_hidden(upload_wrapper, timeout=3)
+
 
         # 关闭材料窗口
         edit_confirm_xpath = '//div[@role="dialog" and @aria-label="编辑材料"]//div[contains(@class, "el-dialog__footer")]//button[span[text()="确定"]]'
-        page.wait.ele_displayed(edit_confirm_xpath, timeout=1)
         page.ele(f'xpath:{edit_confirm_xpath}').click()
 
         # 任务终点：跳转到最后的提交大表检查页，交由人工二次复核并提交
@@ -880,7 +882,7 @@ def get_service():
     return ContractOCRService()
 
 def main():
-    st.header("📄 河源不动产信息自动录入终端（V3.2 BY ZeroS）")
+    st.header("📄 河源不动产信息自动录入终端（V3.3 BY ZeroS）")
     
     # Session State 初始化，用于在 Streamlit 的重绘机制中长久保留计算好的数据
     if 'last_file_id' not in st.session_state: st.session_state.last_file_id = None
