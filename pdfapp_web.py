@@ -489,7 +489,7 @@ class ContractOCRService:
 
         # 如果提取失败赋予默认值
         extracted["起始时间"] = start_dt if start_dt else f"{time.strftime('%Y-%m-%d', time.localtime())} 00:00:00"
-        extracted["结束时间"] = end_dt if end_dt else "2036-12-31 00:00:00"
+        extracted["结束时间"] = end_dt if end_dt else ""
         return extracted
 
     def scan_and_fetch(self, img):
@@ -857,7 +857,6 @@ def web_input(input_data, uploaded_file):
         # 等待上传弹窗完全消失
         page.wait.ele_hidden(upload_wrapper, timeout=3)
 
-
         # 关闭材料窗口
         edit_confirm_xpath = '//div[@role="dialog" and @aria-label="编辑材料"]//div[contains(@class, "el-dialog__footer")]//button[span[text()="确定"]]'
         page.ele(f'xpath:{edit_confirm_xpath}').click()
@@ -877,12 +876,27 @@ st.set_page_config(
     layout="wide" # 使用全宽布局适配多列显示
 )
 
+def format_date_callback(key):
+    val = st.session_state[key].strip()
+    if not val:
+        return
+    # 尝试处理 8 位数字: 20260511 -> 2026-05-11 00:00:00
+    if re.match(r"^\d{8}$", val):
+        formatted = f"{val[:4]}-{val[4:6]}-{val[6:]} 00:00:00"
+        st.session_state[key] = formatted
+    # 尝试处理 YYYY-MM-DD: 2026-05-11 -> 2026-05-11 00:00:00
+    elif re.match(r"^\d{4}-\d{2}-\d{2}$", val):
+        st.session_state[key] = f"{val} 00:00:00"
+    # Already YYYY-MM-DD HH:MM:SS
+    elif re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", val):
+        pass
+
 def get_service():
     """工厂方法：实例化并在内存中保有核心工作组件"""
     return ContractOCRService()
 
 def main():
-    st.header("📄 河源不动产信息自动录入终端（V3.3 BY ZeroS）")
+    st.header("📄 河源不动产信息自动录入终端（V3.5 BY ZeroS）")
     
     # Session State 初始化，用于在 Streamlit 的重绘机制中长久保留计算好的数据
     if 'last_file_id' not in st.session_state: st.session_state.last_file_id = None
@@ -913,6 +927,17 @@ def main():
                 
                 if ocr_result and len(ocr_result) > 0 and ocr_result[0] is not None:
                     st.session_state.ocr_info = service.extract_key_info(ocr_result)
+                    # 当新文件上传时，用OCR结果初始化所有表单字段的会话状态
+                    # 这是解决“双重绑定”问题的关键：确保会话状态是唯一的数据源
+                    info = st.session_state.ocr_info
+                    st.session_state[f"no_{f_key}"] = info['合同编号']
+                    st.session_state[f"mort_{f_key}"] = info['抵押人']
+                    st.session_state[f"id_{f_key}"] = info['证件号码']
+                    st.session_state[f"mort2_{f_key}"] = info.get('抵押人2', '')
+                    st.session_state[f"id2_{f_key}"] = info.get('证件号码2', '')
+                    st.session_state[f"amt_{f_key}"] = info['债权数额']
+                    st.session_state[f"start_{f_key}"] = info['起始时间']
+                    st.session_state[f"end_{f_key}"] = info['结束时间']
                 else:
                     st.session_state.ocr_info = None
                 
@@ -951,7 +976,7 @@ def main():
                     "使用原始提取值",
                     "02006000292026二手贷7000",
                     "02006000292026一手贷7000",
-                    "02006000292026消费经营组合贷7000、02006000292026高额贷（抵）7000"
+                    "02006000292026贷7000、02006000292026高额贷（抵）7000"
                 ]
                 st.selectbox(
                     "快捷合同模板选择", 
@@ -960,19 +985,20 @@ def main():
                     on_change=update_contract_no
                 )
                 
-                # 双向绑定设计，用户更改输入框内容后，值保留在 session 对应的 key 里
-                contract_no = st.text_input("合同编号", value=info['合同编号'], key=f"no_{f_key}")
-                mortgagor = st.text_input("抵押人", value=info['抵押人'], key=f"mort_{f_key}")
-                id_card = st.text_input("证件号码", value=info['证件号码'], key=f"id_{f_key}")
-                mortgagor2 = st.text_input("抵押人2", value=info.get('抵押人2', ''), key=f"mort2_{f_key}")
-                id_card2 = st.text_input("证件号码2", value=info.get('证件号码2', ''), key=f"id2_{f_key}")
-                amount = st.text_input("债权数额", value=info['债权数额'], key=f"amt_{f_key}")
-                
+                # 移除 value 参数，让组件直接从 st.session_state 中通过 key 读取和更新值
+                # 这样可以避免在回调函数更新 session_state 后，下次渲染时 value 参数与之冲突
+                contract_no = st.text_input("合同编号", key=f"no_{f_key}")
+                mortgagor = st.text_input("抵押人", key=f"mort_{f_key}")
+                id_card = st.text_input("证件号码", key=f"id_{f_key}")
+                mortgagor2 = st.text_input("抵押人2", key=f"mort2_{f_key}")
+                id_card2 = st.text_input("证件号码2", key=f"id2_{f_key}")
+                amount = st.text_input("债权数额（万元）", key=f"amt_{f_key}")
+
                 d1, d2 = st.columns(2)
                 with d1:
-                    start_date = st.text_input("起始时间", value=info['起始时间'], key=f"start_{f_key}")
+                    st.text_input("抵押起始时间", key=f"start_{f_key}", on_change=format_date_callback, args=(f"start_{f_key}",))
                 with d2:
-                    end_date = st.text_input("结束时间", value=info['结束时间'], key=f"end_{f_key}")
+                    st.text_input("抵押结束时间", key=f"end_{f_key}", on_change=format_date_callback, args=(f"end_{f_key}",))
             else:
                 st.error("OCR 识别失败，未能提取到有效文字。")
                 contract_no, mortgagor, mortgagor2, id_card, id_card2, amount, start_date, end_date = "", "", "", "", "", "", "", ""
