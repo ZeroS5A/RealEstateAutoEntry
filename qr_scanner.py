@@ -296,6 +296,37 @@ class QRScanner:
         return None
 
     # ==================================================================
+    # 统一解码调度
+    # ==================================================================
+
+    def _try_decode_all(self, img, context=""):
+        """
+        统一解码入口：zxing-cpp → WeChatQRCode 多尺度。
+        context 用于日志区分调用位置（如 "全图"/"定位区域"/"长边左半"）。
+        返回解码文本或 None。
+        """
+        if img is None or img.size == 0:
+            return None
+
+        # ── zxing-cpp ──
+        result = self._try_decode_zxing(img)
+        if result:
+            print(f"  [{context}] [zxing] ✓")
+            return result
+
+        # ── WeChatQRCode 多尺度 ──
+        if self.qr_detector is not None:
+            result = self._scan_multiscale_wx(img)
+            if result:
+                print(f"  [{context}] [wx] ✓")
+                return result
+        else:
+            print(f"  [{context}] [wx] ⊘ 引擎未就绪")
+
+        print(f"  [{context}] ✗ 未能识别")
+        return None
+
+    # ==================================================================
     # 主扫描入口
     # ==================================================================
 
@@ -304,9 +335,9 @@ class QRScanner:
         主入口：扫描图像中的二维码，返回解码文本或 None。
 
         流水线：
-          1. zxing-cpp 全图扫描（原图 + CLAHE）→ 命中直接返回
-          2. OpenCV QRDetector 定位 → 裁剪 → WeChatQRCode 多尺度扫描
-          3. 定位失败 → 长边一半 + 中心50% 兜底裁剪 → WeChatQRCode 扫描
+          1. 全图扫描（zxing → wx）
+          2. OpenCV QRDetector 定位 → 裁剪 → 识别（zxing → wx）
+          3. 长边一半 + 中心50% 兜底裁剪 → 识别（zxing → wx）
         """
         if img is None:
             return None
@@ -316,22 +347,21 @@ class QRScanner:
         print(f"[QR Pipeline] 输入图像尺寸: {w_img}x{h_img}")
 
         # ================================================================
-        # Step 1: zxing-cpp 全图扫描（最快路径）
+        # Step 1: 全图扫描
         # ================================================================
-        print("[QR Pipeline] Step 1/3: zxing-cpp 全图扫描...")
-        result = self._try_decode_zxing(img)
+        print("[QR Pipeline] Step 1/3: 全图扫描...")
+        result = self._try_decode_all(img, context="全图")
         if result:
-            print(f"  [zxing] ✓ 全图识别成功！")
-            print(f"  [zxing] 结果: {result[:100]}{'...' if len(result) > 100 else ''}")
+            print(f"[QR Pipeline] ✓ 全图命中！")
+            print(f"  结果: {result[:100]}{'...' if len(result) > 100 else ''}")
             print("=" * 60 + "\n")
             self.last_crops = [img]
             return result
-        print(f"  [zxing] ✗ 全图未能识别")
 
         # ================================================================
-        # Step 2: OpenCV QRDetector 定位 → 裁剪 → WeChatQRCode
+        # Step 2: OpenCV QRDetector 定位 → 裁剪 → 识别
         # ================================================================
-        print("[QR Pipeline] Step 2/3: OpenCV QRDetector 定位 → WeChatQRCode 识别...")
+        print("[QR Pipeline] Step 2/3: OpenCV QRDetector 定位...")
         qr_region, located, _ = self._locate_qr_opencv(img)
 
         if located and qr_region is not None:
@@ -339,29 +369,23 @@ class QRScanner:
             print(f"[QR Pipeline] ✓ 定位成功，裁剪区域: {rw}x{rh}")
             self.last_crops = [qr_region]
 
-            if self.qr_detector is not None:
-                print(f"  [wx] 对定位区域进行多尺度扫描...")
-                result = self._scan_multiscale_wx(qr_region)
-                if result:
-                    print(f"  [wx] ✓ 识别成功！")
-                    print(f"  [wx] 结果: {result[:100]}{'...' if len(result) > 100 else ''}")
-                    print("=" * 60 + "\n")
-                    return result
-                print(f"  [wx] ✗ 未能识别")
-            else:
-                print(f"  [wx] ⊘ 引擎未就绪")
-            print("[QR Pipeline] 定位成功但 wx 未命中")
+            result = self._try_decode_all(qr_region, context="定位区域")
+            if result:
+                print(f"[QR Pipeline] ✓ 定位区域命中！")
+                print(f"  结果: {result[:100]}{'...' if len(result) > 100 else ''}")
+                print("=" * 60 + "\n")
+                return result
+
+            print("[QR Pipeline] 定位成功但所有引擎未命中")
             print("=" * 60 + "\n")
             return None
 
         # ================================================================
-        # Step 3: 兜底裁剪 → WeChatQRCode
+        # Step 3: 兜底裁剪 → 逐区域识别
         # ================================================================
-        print("[QR Pipeline] Step 3/3: 兜底裁剪 → WeChatQRCode 扫描...")
+        print("[QR Pipeline] Step 3/3: 兜底裁剪 → 逐区域识别...")
         regions = self._generate_fallback_crops(img)
         self.last_crops = [r for _, r in regions]
-        for i, (name, crop) in enumerate(regions):
-            print(f"[QR Pipeline]   兜底区域[{i}] {name}: {crop.shape[1]}x{crop.shape[0]}")
         print(f"[QR Pipeline] 待扫描区域共 {len(regions)} 个")
 
         for idx, (region_name, region) in enumerate(regions):
@@ -371,17 +395,11 @@ class QRScanner:
             rh, rw = region.shape[:2]
             print(f"\n[QR Pipeline] ┌─ 区域 [{idx + 1}/{len(regions)}] {region_name} ({rw}x{rh}) ─┐")
 
-            if self.qr_detector is not None:
-                print(f"  [wx] 尝试 WeChatQRCode 多尺度扫描...")
-                result = self._scan_multiscale_wx(region)
-                if result:
-                    print(f"  [wx] ✓ 识别成功！")
-                    print(f"  [wx] 结果: {result[:100]}{'...' if len(result) > 100 else ''}")
-                    return result
-                else:
-                    print(f"  [wx] ✗ 未能识别")
-            else:
-                print(f"  [wx] ⊘ 引擎未就绪，跳过")
+            result = self._try_decode_all(region, context=region_name)
+            if result:
+                print(f"[QR Pipeline] ✓ 兜底区域命中！")
+                print(f"  结果: {result[:100]}{'...' if len(result) > 100 else ''}")
+                return result
 
             print(f"[QR Pipeline] └─ 区域 [{idx + 1}/{len(regions)}] 未命中 ─┘")
 
