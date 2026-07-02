@@ -13,7 +13,6 @@ import urllib3
 import fitz  # PyMuPDF 用于处理 PDF 文件
 from urllib.parse import unquote
 import gc
-import hashlib
 import pandas as pd
 import tempfile
 import time
@@ -24,6 +23,9 @@ import time
 from DrissionPage import ChromiumPage, ChromiumOptions
 from DrissionPage.errors import ElementNotFoundError
 import time
+
+# 二维码识别引擎（独立模块）
+from qr_scanner import QRScanner
 
 # 禁用 requests 在抓取 HTTPS 接口时产生的安全请求警告 (兼容政务内网环境)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -40,16 +42,8 @@ class ContractOCRService:
             st.error(f"RapidOCR 初始化失败: {e}")
             self.ocr = None
 
-        # 2. 微信开源的超强二维码识别引擎配置 (比 OpenCV 原生的好用很多，支持倾斜和轻微模糊)
-        self.model_dir = "wechat_models"
-        self.wechat_models = {
-            "detect.prototxt": "https://raw.githubusercontent.com/WeChatCV/opencv_3rdparty/wechat_qrcode/detect.prototxt",
-            "detect.caffemodel": "https://raw.githubusercontent.com/WeChatCV/opencv_3rdparty/wechat_qrcode/detect.caffemodel",
-            "sr.prototxt": "https://raw.githubusercontent.com/WeChatCV/opencv_3rdparty/wechat_qrcode/sr.prototxt",
-            "sr.caffemodel": "https://raw.githubusercontent.com/WeChatCV/opencv_3rdparty/wechat_qrcode/sr.caffemodel"
-        }
-        # 加载引擎
-        self.qr_detector = self._init_wechat_qrcode()
+        # 2. 二维码识别引擎（独立模块：OpenCV定位 + WeChatQRCode + zxing-cpp 三级策略）
+        self.qr_scanner = QRScanner()
         self.last_crops = []
 
         # 3. 政务系统后端接口配置 (用于通过二维码解析出的 URL 获取不动产核心数据)
@@ -58,73 +52,6 @@ class ContractOCRService:
             "JGID": "FC830662-EA75-427C-9A82-443B91E383CB",
             "SJLY": "0q"
         }
-
-    # 微信二维码识别引擎模型文件的 MD5 校验值
-    # 参考: https://github.com/jenly1314/WeChatQRCode
-    _WECHAT_QR_MODEL_MD5 = {
-        "detect.prototxt": "6fb4976b32695f9f5c6305c19f12537d",
-        "detect.caffemodel": "238e2b2d6f3c18d6c3a30de0c31e23cf",
-        "sr.prototxt": "69db99927a70df953b471daaba03fbef",
-        "sr.caffemodel": "cbfcd60361a73beb8c583eea7e8e6664",
-    }
-
-    def _init_wechat_qrcode(self):
-        """
-        初始化微信二维码识别引擎（WeChatQRCode）。
-        自动下载模型文件并进行 MD5 完整性校验，确保引擎可用。
-        参考: https://github.com/jenly1314/WeChatQRCode
-        """
-        if not os.path.exists(self.model_dir):
-            os.makedirs(self.model_dir)
-
-        paths = {}
-        for filename, url in self.wechat_models.items():
-            file_path = os.path.join(self.model_dir, filename)
-            paths[filename] = file_path
-
-            need_download = False
-            if not os.path.exists(file_path):
-                need_download = True
-            else:
-                # MD5 完整性校验
-                expected_md5 = self._WECHAT_QR_MODEL_MD5.get(filename)
-                if expected_md5:
-                    with open(file_path, 'rb') as f:
-                        actual_md5 = hashlib.md5(f.read()).hexdigest()
-                    if actual_md5 != expected_md5:
-                        print(f"[WeChatQRCode] 模型文件 {filename} MD5 校验失败，重新下载...")
-                        os.remove(file_path)
-                        need_download = True
-
-            if need_download:
-                for attempt in range(3):
-                    try:
-                        print(f"[WeChatQRCode] 下载模型: {filename} (第{attempt+1}次)...")
-                        resp = requests.get(url, timeout=30, verify=False)
-                        resp.raise_for_status()
-                        with open(file_path, 'wb') as f:
-                            f.write(resp.content)
-                        # 校验下载后的文件完整性
-                        expected_md5 = self._WECHAT_QR_MODEL_MD5.get(filename)
-                        if expected_md5:
-                            with open(file_path, 'rb') as f:
-                                actual_md5 = hashlib.md5(f.read()).hexdigest()
-                            if actual_md5 != expected_md5:
-                                print(f"[WeChatQRCode] {filename} MD5 不匹配，将重试...")
-                                os.remove(file_path)
-                                continue
-                        break
-                    except Exception as e:
-                        print(f"[WeChatQRCode] 下载 {filename} 失败: {e}")
-
-        try:
-            return cv2.wechat_qrcode_WeChatQRCode(
-                paths["detect.prototxt"], paths["detect.caffemodel"],
-                paths["sr.prototxt"], paths["sr.caffemodel"]
-            )
-        except Exception as e:
-            print(f"[WeChatQRCode] 引擎初始化失败: {e}")
-            return None
 
     def _enhance_image(self, img):
         """
@@ -159,135 +86,6 @@ class ContractOCRService:
         cleaned = re.sub(r'[）(\s]+$', '', cleaned)
         cleaned = re.sub(r'\s+', ' ', cleaned)
         return cleaned.strip()
-        
-    # ==================================================================
-    # 二维码识别核心方法（基于 WeChatQRCode 引擎，多尺度扫描策略）
-    # 参考: https://github.com/jenly1314/WeChatQRCode
-    # ==================================================================
-
-    def _preprocess_for_qr(self, img):
-        """二维码专用图像预处理。针对二维码特征进行对比度增强，
-        提升模糊、低对比度、复印件等场景下的识别率。"""
-        if img is None or img.size == 0:
-            return None
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        return clahe.apply(gray)
-
-    def _try_decode(self, img):
-        """尝试在给定图像上识别二维码，返回识别结果文本或 None。
-        兼容 BGR 彩色图和单通道灰度图。"""
-        if self.qr_detector is None or img is None or img.size == 0:
-            return None
-        try:
-            res, _ = self.qr_detector.detectAndDecode(img)
-            if res and len(res) > 0 and res[0]:
-                return res[0]
-        except Exception:
-            pass
-        return None
-
-    def _scan_multiscale(self, img):
-        """多尺度二维码扫描（参考 WeChatQRCode 项目的多分辨率策略）。
-        在不同缩放比例下尝试识别，提升对各种尺寸二维码的识别率。"""
-        if img is None or img.size == 0:
-            return None
-
-        # 扫描策略：(缩放因子, 是否预处理)
-        strategies = [
-            (1.0, False),   # 原图直接扫描
-            (1.0, True),    # 原图 + 预处理
-            (2.0, False),   # 放大2倍（处理小二维码）
-            (2.0, True),    # 放大2倍 + 预处理
-            (0.5, False),   # 缩小（处理大尺寸或模糊二维码）
-        ]
-
-        for scale, preprocess in strategies:
-            if scale != 1.0:
-                interp = cv2.INTER_CUBIC if scale > 1.0 else cv2.INTER_AREA
-                scaled = cv2.resize(img, (0, 0), fx=scale, fy=scale, interpolation=interp)
-            else:
-                scaled = img
-
-            if preprocess:
-                processed = self._preprocess_for_qr(scaled)
-                if processed is not None:
-                    result = self._try_decode(processed)
-                    if result:
-                        return result
-            else:
-                result = self._try_decode(scaled)
-                if result:
-                    return result
-        return None
-
-    def _scan_region_crop(self, img):
-        """区域裁剪扫描（二级兜底策略）。
-        通过形态学运算定位疑似二维码区域后局部识别。
-        仅在多尺度全图扫描失败后启用。"""
-        if img is None or img.size == 0:
-            return []
-
-        h, w = img.shape[:2]
-        crops = []
-
-        try:
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            scale = 1.0
-            if max(h, w) > 2000:
-                scale = 1000.0 / max(h, w)
-                gray = cv2.resize(gray, (0, 0), fx=scale, fy=scale)
-
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            binary = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
-
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
-            closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-            kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-            opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel_open)
-
-            contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-            center_x, center_y = int(w * scale // 2), int(h * scale // 2)
-            candidates = []
-
-            for c in contours:
-                x, y, cw, ch = cv2.boundingRect(c)
-                area = cw * ch
-                img_area = (h * w * scale * scale)
-
-                if area < (img_area * 0.005) or area > (img_area * 0.4):
-                    continue
-
-                aspect_ratio = float(cw) / max(ch, 1)
-                if 0.8 < aspect_ratio < 1.2:
-                    cx, cy = x + cw // 2, y + ch // 2
-                    dist = (cx - center_x)**2 + (cy - center_y)**2
-                    candidates.append((dist, x, y, cw, ch))
-
-            candidates.sort(key=lambda item: item[0])
-
-            for _, x, y, cw, ch in candidates[:10]:
-                real_x = int(x / scale)
-                real_y = int(y / scale)
-                real_cw = int(cw / scale)
-                real_ch = int(ch / scale)
-
-                pad = max(80, int(real_cw * 0.1))
-                x1 = max(0, real_x - pad)
-                y1 = max(0, real_y - pad)
-                x2 = min(w, real_x + real_cw + pad)
-                y2 = min(h, real_y + real_ch + pad)
-
-                crops.append(img[y1:y2, x1:x2])
-
-        except Exception as e:
-            print(f"[WeChatQRCode] 区域裁剪异常: {e}")
-
-        # 兜底：中心区域裁剪
-        crops.append(img[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4])
-        crops.append(img[h // 6 : 5 * h // 6, w // 6 : 5 * w // 6])
-        return crops
 
     def process_file(self, uploaded_file):
         """处理上传的文件流：区分 PDF 和普通图片，调用 OCR 并寻找二维码"""
@@ -495,10 +293,10 @@ class ContractOCRService:
     def scan_and_fetch(self, img):
         """
         扫描二维码并在解析出 URL 后向后端发包拉取详细业务数据。
-        扫描策略：多尺度全图扫描 → 区域裁剪扫描（二级兜底）。
+        委托 QRScanner 处理图像识别，本方法仅负责 API 交互。
         """
-        if self.qr_detector is None or img is None:
-            return None, "引擎未就绪或图片为空"
+        if img is None:
+            return None, "图片为空"
 
         def _fetch_api(qr_text):
             try:
@@ -518,31 +316,14 @@ class ContractOCRService:
             except Exception as e:
                 return None, str(e)
 
-        # === 第一级：多尺度全图扫描 ===
-        result = self._scan_multiscale(img)
-        if result:
-            print("[WeChatQRCode] 多尺度扫描识别成功！")
-            return _fetch_api(result)
+        # 委托 QRScanner 执行识别流水线
+        qr_text = self.qr_scanner.scan(img)
+        self.last_crops = self.qr_scanner.last_crops
 
-        # === 第二级：区域裁剪扫描（兜底） ===
-        print("[WeChatQRCode] 多尺度扫描未命中，尝试区域裁剪...")
-        crops = self._scan_region_crop(img)
-        self.last_crops = crops
-        for crop in crops:
-            if crop is not None and crop.size > 0:
-                result = self._try_decode(crop)
-                if result:
-                    print("[WeChatQRCode] 区域裁剪识别成功！")
-                    return _fetch_api(result)
-                # 裁剪区域也尝试预处理
-                processed = self._preprocess_for_qr(crop)
-                if processed is not None:
-                    result = self._try_decode(processed)
-                    if result:
-                        print("[WeChatQRCode] 区域裁剪+预处理识别成功！")
-                        return _fetch_api(result)
-
-        return None, "未识别到二维码"
+        if qr_text:
+            return _fetch_api(qr_text)
+        else:
+            return None, "未识别到二维码"
 
 
 def read_json_config(config_path="config.json"):
@@ -896,7 +677,7 @@ def get_service():
     return ContractOCRService()
 
 def main():
-    st.header("📄 河源不动产信息自动录入终端（V3.5 BY ZeroS）")
+    st.header("📄 河源不动产信息自动录入终端（V3.6 BY ZeroS）")
     
     # Session State 初始化，用于在 Streamlit 的重绘机制中长久保留计算好的数据
     if 'last_file_id' not in st.session_state: st.session_state.last_file_id = None
