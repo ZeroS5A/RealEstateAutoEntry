@@ -1,7 +1,7 @@
 ﻿import streamlit as st
 import cv2
 import re
-from rapidocr_onnxruntime import RapidOCR
+from ocr_service import OCRService
 import json
 import os
 import sys
@@ -35,12 +35,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # =========================================================
 class ContractOCRService:
     def __init__(self):
-        # 1. 初始化 RapidOCR 引擎 (使用 ONNX 运行时，轻量且在 CPU 上推理极快)
-        try:
-            self.ocr = RapidOCR()
-        except Exception as e:
-            st.error(f"RapidOCR 初始化失败: {e}")
-            self.ocr = None
+        # 1. OCR 文字识别与信息提取引擎（独立模块）
+        self.ocr_service = OCRService()
 
         # 2. 二维码识别引擎（独立模块：OpenCV定位 + WeChatQRCode + zxing-cpp 三级策略）
         self.qr_scanner = QRScanner()
@@ -52,40 +48,6 @@ class ContractOCRService:
             "JGID": "FC830662-EA75-427C-9A82-443B91E383CB",
             "SJLY": "0q"
         }
-
-    def _enhance_image(self, img):
-        """
-        图像增强逻辑：使用 CLAHE (对比度受限自适应直方图均衡化) 和高斯锐化，
-        提升复印件、暗斑图像的文字对比度，显著提高 OCR 识别率。
-        """
-        if img is None: return None
-        # 转灰度图
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        # 限制对比度的直方图均衡
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-        # 高斯模糊后，使用 addWeighted 进行图像锐化
-        gaussian = cv2.GaussianBlur(enhanced, (0, 0), 3)
-        sharpened = cv2.addWeighted(enhanced, 1.5, gaussian, -0.5, 0)
-        return cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
-
-    def _format_date_part(self, raw_str):
-        """格式化日期片段，确保补零对齐（如把 '5' 转为 '05'）"""
-        nums = re.findall(r'\d+', str(raw_str))
-        if nums:
-            val = int(nums[0])
-            if val > 100: val = val % 100
-            return f"{val:02d}"
-        return "01"
-
-    def _clean_noise(self, text):
-        """清理 OCR 识别出的常见下划线、破折号及括号噪音"""
-        if not text: return ""
-        cleaned = re.sub(r'[_\-—~]+', ' ', text)
-        cleaned = re.sub(r'^[（(\s]+', '', cleaned)
-        cleaned = re.sub(r'[）(\s]+$', '', cleaned)
-        cleaned = re.sub(r'\s+', ' ', cleaned)
-        return cleaned.strip()
 
     def process_file(self, uploaded_file):
         """处理上传的文件流：区分 PDF 和普通图片，调用 OCR 并寻找二维码"""
@@ -121,15 +83,10 @@ class ContractOCRService:
                         cv_img_1 = cv2.cvtColor(np.array(img_1), cv2.COLOR_RGB2BGR)
                         del pix_1, img_data_1 
                         
-                        preview_img = cv2.cvtColor(cv_img_1, cv2.COLOR_BGR2RGB) 
-                        
-                        # 图像增强后送入 RapidOCR
-                        enhanced_img_1 = self._enhance_image(cv_img_1)
-                        if self.ocr:
-                            rapid_res, _ = self.ocr(enhanced_img_1)
-                            if rapid_res:
-                                # 格式转换，包裹为类似 PaddleOCR 的列表结构以复用原有提取逻辑
-                                ocr_result = [[[box, (text, float(score))] for box, text, score in rapid_res]]
+                        preview_img = cv2.cvtColor(cv_img_1, cv2.COLOR_BGR2RGB)
+
+                        # 委托 OCRService 进行文字识别
+                        ocr_result = self.ocr_service.recognize(cv_img_1)
                     
                     if len(doc) > 0:
                         # ===== 处理末页：用于二维码识别（不动产合同二维码一般在最后一页附图页） =====
@@ -153,12 +110,9 @@ class ContractOCRService:
             img_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             
             preview_img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-            enhanced_img = self._enhance_image(img_bgr)
-            
-            if self.ocr:
-                rapid_res, _ = self.ocr(enhanced_img)
-                if rapid_res:
-                    ocr_result = [[[box, (text, float(score))] for box, text, score in rapid_res]]
+
+            # 委托 OCRService 进行文字识别
+            ocr_result = self.ocr_service.recognize(img_bgr)
             qr_img = img_bgr 
 
         # 终端调试输出
@@ -174,121 +128,6 @@ class ContractOCRService:
             print("="*80 + "\n")
         
         return ocr_result, qr_img, preview_img
-
-    def extract_key_info(self, ocr_result):
-        """
-        结构化提取逻辑：基于正则匹配和关键字定位，
-        从杂乱无章的 OCR 返回结果中抽离核心合同要素。
-        """
-        if not ocr_result or ocr_result[0] is None:
-            return {
-                "合同编号": "未找到", "抵押人": "未找到", "抵押人2": "",
-                "证件号码": "", "证件号码2": "", "债权数额": "未找到",
-                "起始时间": "未找到", "结束时间": "未找到"
-            }
-
-        full_text_lines = [str(line[1][0]) for line in ocr_result[0]]
-        full_text = "\n".join(full_text_lines)
-        
-        extracted = {
-            "合同编号": "未找到", "抵押人": "未找到", "抵押人2": "",
-            "证件号码": "", "证件号码2": "", "债权数额": "未找到",
-            "起始时间": "未找到", "结束时间": "未找到"
-        }
-
-        # 1. 提取合同编号：匹配"合同编号："后面的连续字符
-        m = re.search(r"合同编号[：:](.*?)(?:\n|$)", full_text)
-        if m: 
-            raw_no = m.group(1).strip()
-            extracted["合同编号"] = re.sub(r'[_\-—]+', '', raw_no).strip()
-
-        # 2. 提取抵押人：支持顿号或空格分隔提取出主/次抵押人
-        mortgagor_pattern = r"抵押人\s*[：:]\s*([^（(\n]+)"
-        mortgagors = re.findall(mortgagor_pattern, full_text)
-        cleaned_mortgagors = []
-        for mtg in mortgagors:
-            clean_m = self._clean_noise(mtg)
-            parts = re.split(r'[、,，\s]+', clean_m)
-            for part in parts:
-                part = part.strip()
-                if part and part not in cleaned_mortgagors and part not in ["等", "及"]:
-                    cleaned_mortgagors.append(part)
-                
-        if len(cleaned_mortgagors) > 0:
-            extracted["抵押人"] = cleaned_mortgagors[0]
-        if len(cleaned_mortgagors) > 1:
-            extracted["抵押人2"] = cleaned_mortgagors[1]
-
-        # 3. 提取证件号码：使用 18 位身份证严谨正则。如果包含字母X则转大写。
-        ids = []
-        for line in full_text_lines:
-            if "证件号码" in line or "身份证" in line or "号码" in line:
-                clean_line = re.sub(r'[\s\-_—、，,]+', '', line)
-                line_ids = re.findall(r'[1-9]\d{16}[0-9Xx]', clean_line)
-                for i in line_ids:
-                    i_upper = i.upper()
-                    if i_upper not in ids:
-                        ids.append(i_upper)
-        
-        if not ids:
-            clean_full_content = re.sub(r'[\s\-_—、，,]+', '', full_text)
-            fallback_ids = re.findall(r'[1-9]\d{16}[0-9Xx]', clean_full_content)
-            for i in fallback_ids:
-                i_upper = i.upper()
-                if i_upper not in ids:
-                    ids.append(i_upper)
-                    
-        if len(ids) > 0:
-            extracted["证件号码"] = ids[0]
-        if len(ids) > 1:
-            extracted["证件号码2"] = ids[1]
-
-        # 4. 提取债权数额：过滤干扰符保留纯数字与小数点
-        m = re.search(r"人民币\s*([\d\.\-_—]+)\s*(万?元)", full_text)
-        if m:
-            num_str = self._clean_noise(m.group(1)).replace(' ', '')
-            clean_num = re.sub(r'[^\d\.]', '', num_str) 
-            extracted["债权数额"] = clean_num
-        else:
-            m_alt = re.search(r"([\d\.]+)\s*万元", full_text)
-            if m_alt:
-                extracted["债权数额"] = m_alt.group(1)
-
-        # 5. 提取履行时间：匹配格式"xxxx年xx月xx日至xxxx年xx月xx日"
-        target_line = ""
-        for i, text in enumerate(full_text_lines):
-            if "履行期限" in text:
-                target_line = text
-                if i + 1 < len(full_text_lines):
-                    target_line += " " + full_text_lines[i+1]
-                break
-        if not target_line: target_line = full_text
-        norm_text = re.sub(r'(?<=\d日)\s*([至72ij/z~])\s*(?=\d{4}年)', '至', target_line)
-        clean_term = re.sub(r'[_\-—~]+', '', norm_text)
-        date_pattern = r"(\d{4})年(.*?)月(.*?)日"
-        start_dt, end_dt = None, None
-
-        if "至" in clean_term:
-            parts = clean_term.split("至", 1)
-            s_match = re.search(date_pattern, parts[0])
-            if s_match:
-                start_dt = f"{s_match.group(1)}-{self._format_date_part(s_match.group(2))}-{self._format_date_part(s_match.group(3))} 00:00:00"
-            e_match = re.search(date_pattern, parts[1])
-            if e_match:
-                end_dt = f"{e_match.group(1)}-{self._format_date_part(e_match.group(2))}-{self._format_date_part(e_match.group(3))} 00:00:00"
-
-        if not start_dt or not end_dt:
-            all_matches = re.findall(date_pattern, clean_term)
-            if len(all_matches) >= 2:
-                if not start_dt:
-                    start_dt = f"{all_matches[0][0]}-{self._format_date_part(all_matches[0][1])}-{self._format_date_part(all_matches[0][2])} 00:00:00"
-                if not end_dt:
-                    end_dt = f"{all_matches[-1][0]}-{self._format_date_part(all_matches[-1][1])}-{self._format_date_part(all_matches[-1][2])} 00:00:00"
-
-        # 如果提取失败赋予默认值
-        extracted["起始时间"] = start_dt if start_dt else f"{time.strftime('%Y-%m-%d', time.localtime())} 00:00:00"
-        extracted["结束时间"] = end_dt if end_dt else ""
-        return extracted
 
     def scan_and_fetch(self, img):
         """
@@ -455,10 +294,10 @@ def web_input(input_data, uploaded_file):
     
     if login_success:
         # 导航并依次展开各级菜单
-        click_success = click_target_element(page,'//*[@id="app"]/div/div/div[1]/div[1]/ul/div[2]/li/div')
-        click_success = click_target_element(page,'//*[@id="app"]/div/div/div[1]/div[1]/ul/div[2]/li/ul/li/ul/div[1]/li/div')
+        click_success = click_target_element(page,'//*[@id="app"]/div/div/div[1]/div[1]/ul/div[3]/li/div')
+        click_success = click_target_element(page,'//*[@id="app"]/div/div/div[1]/div[1]/ul/div[3]/li/ul/li/ul/div[1]/li/div')
         time.sleep(1)
-        click_success = click_target_element(page,'//*[@id="app"]/div/div/div[1]/div[1]/ul/div[2]/li/ul/li/ul/div[1]/li/ul/li/ul/div[1]/li')
+        click_success = click_target_element(page,'//*[@id="app"]/div/div/div[1]/div[1]/ul/div[3]/li/ul/li/ul/div[1]/li/ul/li/ul/div[1]/li')
 
         # [阶段 1] 选择公共信息
         click_success = click_target_element(page,'//*[@id="tab-customTabs_17669806073123117"]')
@@ -707,7 +546,7 @@ def main():
                 st.session_state.preview_img = preview_img
                 
                 if ocr_result and len(ocr_result) > 0 and ocr_result[0] is not None:
-                    st.session_state.ocr_info = service.extract_key_info(ocr_result)
+                    st.session_state.ocr_info = service.ocr_service.extract_key_info(ocr_result)
                     # 当新文件上传时，用OCR结果初始化所有表单字段的会话状态
                     # 这是解决“双重绑定”问题的关键：确保会话状态是唯一的数据源
                     info = st.session_state.ocr_info
